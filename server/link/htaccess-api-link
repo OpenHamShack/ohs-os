@@ -1,0 +1,10 @@
+# public_html/api/link/.htaccess (from openhamshack-os server/link): only the
+# endpoint answers here. Nothing is ever stored in this folder; this is a
+# second lock in case something is.
+Options -Indexes
+<FilesMatch ".">
+  Require all denied
+</FilesMatch>
+<Files "link.php">
+  Require all granted
+</Files>

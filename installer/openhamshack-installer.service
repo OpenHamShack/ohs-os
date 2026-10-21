@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenHamShack installer (touchscreen page on 127.0.0.1:8080)
+After=local-fs.target
+# Not on an unattended boot: openhamshack-autoinstall.service has the disk
+# then, and two writers must never meet.
+ConditionKernelCommandLine=!shack.install=auto
+
+[Service]
+# Root because it writes a whole disk; it listens on loopback only, and the
+# kiosk browser is the only client.
+ExecStart=/usr/bin/python3 /opt/openhamshack-installer/installer.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

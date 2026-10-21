@@ -1,0 +1,14 @@
+[Unit]
+Description=Start rootless podman for Dock360 apps outside the API's sandbox
+# See /usr/local/sbin/openhamshack-podman-pause for why this must come first.
+After=systemd-user-sessions.service
+Before=dock360-api.service dock360-metrics.service openhamshack-firstboot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/openhamshack-podman-pause
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

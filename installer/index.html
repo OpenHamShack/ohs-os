@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenHamShack installer</title>
+<style>
+  /* Touch first: there is no keyboard. Everything is one tap target of at
+     least 64px, and nothing needs scrolling on a 1280x800 panel. */
+  :root { --bg:#0e1116; --panel:#171c24; --line:#2a3240; --text:#e8edf4; --dim:#9aa6b6;
+          --go:#2f9e5b; --warn:#d0542c; --sel:#2b6fd6; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+              font:20px/1.4 system-ui, "DejaVu Sans", sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:40px 32px; display:flex; flex-direction:column; gap:24px; height:100%; }
+  h1 { margin:0; font-size:36px; font-weight:600; }
+  p { margin:0; color:var(--dim); }
+  .disks { display:flex; flex-direction:column; gap:12px; }
+  .disk { display:flex; justify-content:space-between; align-items:center; min-height:80px; padding:16px 24px;
+          background:var(--panel); border:2px solid var(--line); border-radius:12px; font-size:22px; cursor:pointer; }
+  .disk.sel { border-color:var(--sel); background:#16233a; }
+  .disk small { color:var(--dim); font-size:18px; }
+  button { width:100%; min-height:88px; border:0; border-radius:14px; font:600 26px system-ui, "DejaVu Sans", sans-serif;
+           color:#fff; background:var(--go); cursor:pointer; }
+  button:disabled { background:#2a3240; color:#6c7787; }
+  button.armed { background:var(--warn); }
+  button.quiet { background:var(--panel); border:2px solid var(--line); min-height:72px; font-size:22px; }
+  .bar { height:28px; background:var(--panel); border-radius:14px; overflow:hidden; border:2px solid var(--line); }
+  .bar > div { height:100%; width:0; background:var(--sel); transition:width .4s; }
+  .big { font-size:28px; color:var(--text); }
+  .err { color:#ff9a7a; font-size:24px; }
+  .row { display:flex; gap:16px; } .row > * { flex:1; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">OpenHamShack installer</h1>
+
+  <section id="pick" class="hidden">
+    <p id="lead">Choose the disk to install on. Everything on it will be erased.</p>
+    <div class="disks" id="disks" style="margin:20px 0"></div>
+    <button id="go" disabled>Choose a disk</button>
+  </section>
+
+  <section id="busy" class="hidden">
+    <p class="big" id="step"></p>
+    <div class="bar" style="margin:24px 0 12px"><div id="fill"></div></div>
+    <p id="pct"></p>
+    <p style="margin-top:24px">Do not switch off or remove the USB stick.</p>
+  </section>
+
+  <section id="done" class="hidden">
+    <p class="big">OpenHamShack is installed and verified.</p>
+    <p style="margin:16px 0 28px">Remove the USB stick or DVD, then tap Restart. OpenHamShack starts and can be opened at http://openhamshack.local/ from any browser on this network.</p>
+    <div class="row"><button id="reboot">Restart</button><button class="quiet" id="off">Switch off</button></div>
+  </section>
+
+  <section id="fail" class="hidden">
+    <p class="err" id="why"></p>
+    <p style="margin:16px 0 28px" id="whatnow"></p>
+    <button class="quiet" id="again">Back</button>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let chosen = null, armed = false, disarm = null, shown = "", dismissed = false;
+  const gb = (b) => (b / 1e9).toFixed(b < 1e11 ? 1 : 0) + " GB";
+  const words = { checking: "Checking the image on the USB stick", writing: "Installing OpenHamShack", verifying: "Checking the installed disk" };
+
+  function show(id) { for (const s of ["pick","busy","done","fail"]) $(s).classList.toggle("hidden", s !== id); }
+
+  function arm(on) {
+    armed = on;
+    clearTimeout(disarm);
+    $("go").classList.toggle("armed", on);
+    $("go").textContent = !chosen ? "Choose a disk" : on ? "Tap again to erase " + chosen.model : "Erase and install";
+    if (on) disarm = setTimeout(() => arm(false), 6000);
+  }
+
+  function renderDisks(list) {
+    const key = JSON.stringify(list);
+    if (key === shown) return;
+    shown = key;
+    const box = $("disks");
+    box.innerHTML = "";
+    if (!list.length) { box.innerHTML = '<p class="err">No internal disk found.</p>'; }
+    if (list.length === 1 && !chosen) chosen = list[0];
+    for (const d of list) {
+      const el = document.createElement("div");
+      el.className = "disk" + (chosen && chosen.path === d.path ? " sel" : "");
+      el.innerHTML = "<span></span><small></small>";
+      el.firstChild.textContent = d.model;
+      el.lastChild.textContent = gb(d.size) + " · " + d.path;
+      el.onclick = () => { chosen = d; shown = ""; renderDisks(list); arm(false); };
+      box.appendChild(el);
+    }
+    $("go").disabled = !chosen;
+    arm(armed);
+  }
+
+  $("go").onclick = async () => {
+    if (!chosen) return;
+    if (!armed) { arm(true); return; }
+    arm(false);
+    $("go").disabled = true;
+    dismissed = false;
+    await fetch("/api/install", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ target: chosen.path }) });
+    poll();
+  };
+  $("reboot").onclick = () => { $("reboot").disabled = true; fetch("/api/reboot", { method: "POST" }); };
+  $("off").onclick = () => { $("off").disabled = true; fetch("/api/poweroff", { method: "POST" }); };
+  $("again").onclick = () => { dismissed = true; shown = ""; poll(); };
+
+  async function poll() {
+    try {
+      const s = await (await fetch("/api/state")).json();
+      if (s.label) $("title").textContent = "Install " + s.label;
+      if (s.phase === "idle") { show("pick"); renderDisks(s.disks); }
+      else if (s.phase === "done") show("done");
+      else if (s.phase === "failed" && dismissed) { show("pick"); renderDisks(s.disks); }
+      else if (s.phase === "failed") {
+        $("why").textContent = s.message;
+        $("whatnow").textContent = s.touched
+          ? "The disk was partly written, so it will not start until an install completes. Tap Back to try again."
+          : "Nothing on the disk has been changed. Tap Back to try again.";
+        show("fail");
+      }
+      else {
+        show("busy");
+        const pct = s.total ? Math.floor(100 * s.done / s.total) : 0;
+        $("step").textContent = words[s.phase] || s.phase;
+        $("fill").style.width = pct + "%";
+        $("pct").textContent = pct + "%" + (s.total ? " · " + gb(s.done) + " of " + gb(s.total) : "");
+      }
+    } catch (e) { /* the server restarts only with the machine */ }
+  }
+  poll();
+  setInterval(poll, 1000);
+</script>
+</body>
+</html>

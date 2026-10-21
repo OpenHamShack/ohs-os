@@ -1,0 +1,3 @@
+# ~/ohs-link/.htaccess: this folder is outside the web root and never
+# served. Should it ever end up under one, refuse everything.
+Require all denied

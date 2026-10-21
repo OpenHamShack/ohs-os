@@ -1,0 +1,46 @@
+#!/bin/bash
+# Grow the root partition and its filesystem to fill the disk, at every boot.
+#
+# The image is built small (a 5.7 GB root) so the USB installer and the ISO
+# stay small, and was written as-is: the appliance's workshop box ran for a month on 5.7 GB of a
+# 477 GB SSD, with received recordings and transmit videos sharing what was
+# left. Growing in place at boot covers every install route - the USB
+# installer, the ISO, or the image written by hand - and is a no-op once the
+# partition already reaches the end of the disk.
+set -euo pipefail
+
+src=$(findmnt -n -o SOURCE /)
+name=$(basename "$src")
+[[ -b "$src" && -e "/sys/class/block/$name/partition" ]] || exit 0
+disk=/dev/$(lsblk -n -d -o PKNAME "$src")
+part=$(cat "/sys/class/block/$name/partition")
+
+for tool in sfdisk partx resize2fs; do
+    command -v "$tool" >/dev/null || { echo "openhamshack-growroot: $tool missing; not growing" >&2; exit 0; }
+done
+
+# Only the last partition can grow, and only into free space after it.
+last=$(lsblk -n -r -o NAME,TYPE "$disk" | awk '$2 == "part" { n = $1 } END { print n }')
+if [[ "$last" == "$name" ]]; then
+    # All in 512-byte units, as /sys reports them whatever the sector size.
+    disk_size=$(cat "/sys/class/block/$(basename "$disk")/size")
+    start=$(cat "/sys/class/block/$name/start")
+    size=$(cat "/sys/class/block/$name/size")
+    # More than 64 MiB free after it: worth growing. Less is the GPT's own
+    # backup header and alignment slack.
+    if (( disk_size - (start + size) > 131072 )); then
+        # An image written to a bigger disk has its backup GPT header where
+        # the image ended, not at the end of the disk; move it first or the
+        # space after it is invisible to sfdisk.
+        if [[ "$(blkid -o value -s PTTYPE "$disk" 2>/dev/null)" == gpt ]]; then
+            sfdisk --relocate gpt-bak-std "$disk"
+        fi
+        echo ", +" | sfdisk --no-reread --no-tell-kernel -N "$part" "$disk"
+        partx -u -n "$part" "$disk"
+        echo "openhamshack-growroot: grew $src to the end of $disk"
+    fi
+fi
+
+# ext4 grows while mounted; "Nothing to do" when it already fills the partition.
+[[ "$(findmnt -n -o FSTYPE /)" == ext4 ]] && resize2fs "$src"
+exit 0

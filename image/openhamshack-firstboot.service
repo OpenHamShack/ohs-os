@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenHamShack first start: per-controller credentials and the preloaded store
+# After the API so the two do not race to create the database; after
+# growroot so the store's images unpack into the whole disk, not the image's
+# few spare gigabytes. Not network-online: nothing here uses the network,
+# and a controller with no cable must still finish its first start.
+After=dock360-api.service openhamshack-growroot.service
+Wants=dock360-api.service
+ConditionPathExists=!/var/lib/openhamshack/firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/openhamshack-firstboot
+StandardOutput=journal+console
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

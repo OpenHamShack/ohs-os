@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Preset the controller's update feeds from the ISO's FEEDS_BASE, once.
+
+    openhamshack-feeds-preset <feeds base URL>
+
+Run by openhamshack-firstboot as the dock360 service account, with
+Dock360's own Python and source on the path, after the database exists.
+
+A new controller should find its updates without anybody typing two URLs
+into Station updates (Brian, 09/10): the ISO is built with
+`--feeds-base https://openhamshack.com/feeds/` and this fills in
+
+    Platform feed   <base>platform-{channel}.json
+    App store feed  <base>catalogue.json
+    Channel         beta
+
+using the same settings keys the Station updates page writes
+(dock360.shack.feeds), so the page shows them and an administrator can
+change them like any others.
+
+It never overrides a choice. Each setting is written only if it has never
+been set (absent from the database - an administrator who cleared a field
+on purpose has set it, to empty). And the preset runs once: first boot runs
+again after a power cut, and by then somebody may have been through setup
+and changed the addresses, so openhamshack-firstboot (root; this runs as the
+service account, which cannot write there) keeps a marker,
+/var/lib/openhamshack/feeds-preset.done, once this has succeeded.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+
+
+def preset(base: str) -> dict:
+    """Returns what was written; {} when there was nothing to do."""
+    from dock360 import db
+    from dock360.shack import feeds
+
+    if not base:
+        return {}
+    if not re.match(r"^https?://[^\s]+$", base):
+        raise SystemExit(f"feeds base {base!r} is not an http or https URL")
+    base = base if base.endswith("/") else base + "/"
+    wanted = {feeds.PLATFORM_URL_KEY: base + "platform-{channel}.json",
+              feeds.CATALOGUE_URL_KEY: base + "catalogue.json",
+              feeds.CHANNEL_KEY: "beta"}
+    written = {}
+    for key, value in wanted.items():
+        if db.setting(key) is None:
+            db.set_setting(key, value)
+            written[key] = value
+    return written
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        return 2
+    for key, value in preset(sys.argv[1].strip()).items():
+        print(f"openhamshack-feeds-preset: {key} = {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

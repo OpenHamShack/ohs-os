@@ -1,0 +1,30 @@
+#!/bin/bash
+# Start the dock360 account's rootless podman "pause" process from inside its
+# own systemd user manager, before the Dock360 API can start it by accident.
+#
+# Rootless podman keeps one long-lived pause process per user holding the
+# user namespace, and every later podman command - every app's container -
+# joins its namespaces. Whoever runs podman first after boot creates it, in
+# whatever sandbox that caller is in. dock360-api.service has
+# ProtectKernelTunables=yes, so when the API is first (a fresh controller
+# with no apps yet, installing its first one from the store) the pause
+# process inherits a read-only /proc/sys, and every container then fails to
+# start with
+#   crun: open `/proc/sys/net/ipv4/ping_group_range`: Read-only file system
+# Shack never shows it because its apps start at boot from the user manager,
+# which gets there first. Found on the first QEMU boot of this image,
+# 09/10/2026; the real fix belongs in Dock360 (have the API leave pause
+# creation to a clean context), and this unit can go when that lands.
+#
+# systemd-run --user puts podman in the user manager; podman then moves the
+# pause process into a scope of its own (podman-pause-*.scope), so it outlives
+# this transient unit. Needs dbus-user-session for the user bus.
+set -u
+uid="$(id -u dock360)"
+for _ in $(seq 1 120); do
+  [[ -S "/run/user/$uid/bus" ]] && break
+  sleep 1
+done
+exec runuser -u dock360 -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+  systemd-run --user --wait --quiet --collect /usr/bin/podman unshare /bin/true

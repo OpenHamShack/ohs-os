@@ -1,0 +1,28 @@
+# The LAN feed mirror on ohs-dev (docs/UPDATES.md): a systemd *user* unit,
+# so it runs as the account that publishes the feeds and needs no root.
+# Lingering keeps it up without a login.
+#
+#   install -D -m 644 tools/openhamshack-feeds.service ~/.config/systemd/user/
+#   install -D -m 755 tools/feed-server.py ~/.local/lib/openhamshack/feed-server.py
+#   systemctl --user daemon-reload && systemctl --user enable --now openhamshack-feeds
+#
+# The server script is installed outside any worktree so that removing a
+# worktree cannot take the feeds down.
+[Unit]
+Description=OpenHamShack update feeds, LAN mirror (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/.local/lib/openhamshack/feed-server.py %h/feeds/www --bind 192.0.2.140 --port 8780
+Restart=on-failure
+RestartSec=5
+# Read-only by construction as well as by code: the service may read the
+# feed root and nothing in it may be written through it.
+ProtectSystem=strict
+ReadOnlyPaths=%h
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

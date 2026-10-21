@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenHamShack unattended install (shack.install=auto)
+# Chosen on the kernel command line (the ISO's CI boot entry): writes the
+# disk named by shack.disk with nobody at the screen, reporting on the
+# console, which that entry puts on the first serial port as well.
+ConditionKernelCommandLine=shack.install=auto
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/openhamshack-installer/installer.py --auto
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

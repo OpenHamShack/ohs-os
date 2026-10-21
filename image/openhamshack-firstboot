@@ -1,0 +1,181 @@
+#!/bin/bash
+# The controller's first start: the parts of Dock360's install.sh that must
+# be made per controller rather than in the image, then the preloaded store.
+#
+#   1. the database (dock360ctl migrate);
+#   2. the station screen's device token - install.sh's step, repeated here
+#      because a token minted at build time would be the same on every
+#      controller made from the ISO, and published with it;
+#   3. each preloaded app package uploaded into the store (signature checked
+#      by the host's own rules, as any upload is);
+#   4. the apps named in /etc/openhamshack/firstboot.conf installed, from
+#      those packages and their carried images - no network involved - or,
+#      after a power cut, finished;
+#   5. the update feeds preset from the ISO's FEEDS_BASE, once, never over
+#      a value somebody has set (openhamshack-feeds-preset);
+#   6. once all of that holds, the preload copies removed (the catalogue
+#      keeps its own) and the done marker written.
+#
+# The administrator is not made here: first-run setup in the web interface
+# (/setup) asks whoever opens it first, as on any fresh Dock360 host.
+#
+# Each step is safe to repeat. The unit runs until a run finishes cleanly
+# (then /var/lib/openhamshack/firstboot.done stops it), so an app whose
+# install failed or was cut off is finished at the next boot rather than
+# forgotten.
+set -uo pipefail
+
+DONE=/var/lib/openhamshack/firstboot.done
+PRELOAD=/var/lib/openhamshack/preload
+FIRST_APPS=""
+FEEDS_BASE=""
+# shellcheck disable=SC1091
+[[ -r /etc/openhamshack/firstboot.conf ]] && . /etc/openhamshack/firstboot.conf
+
+say() { echo "openhamshack-firstboot: $*"; }
+failed=0
+
+# dock360ctl drives the service account's systemd user manager (lingering
+# starts it at boot) and its rootless podman; installing an app needs both.
+uid="$(id -u dock360)"
+for _ in $(seq 1 120); do
+  [[ -S "/run/user/$uid/bus" ]] && break
+  sleep 1
+done
+
+dock360ctl migrate || { say "migrate failed"; exit 1; }
+
+TOKEN_FILE=/etc/openhamshack/local-screen.token
+if [[ ! -s "$TOKEN_FILE" ]]; then
+  token="$(dock360ctl shack local-token --replace)"
+  if [[ -n "$token" ]]; then
+    ( umask 0137; printf '%s\n' "$token" > "${TOKEN_FILE}.tmp" )
+    chown root:shack-kiosk "${TOKEN_FILE}.tmp"
+    chmod 0640 "${TOKEN_FILE}.tmp"
+    mv -f "${TOKEN_FILE}.tmp" "$TOKEN_FILE"
+    say "minted the station screen's credential"
+  else
+    say "could not mint the station screen's credential"
+    failed=1
+  fi
+  unset token
+fi
+
+# Where this controller looks for updates, preset so a new install needs no
+# typing (build.sh --feeds-base). Once only: a later run (after a power cut)
+# may come after an administrator has changed the addresses, and the preset
+# also leaves any setting alone that has been set at all. It runs as the
+# service account with Dock360's own Python, as dock360ctl does, so the
+# database is never touched as root (a root-owned WAL file would lock the
+# control plane out of its own database).
+PRESET_DONE=/var/lib/openhamshack/feeds-preset.done
+if [[ -n "$FEEDS_BASE" && ! -e "$PRESET_DONE" ]]; then
+  if (cd / && setpriv --reuid="$uid" --regid="$(id -g dock360)" --init-groups \
+        env PYTHONPATH=/opt/dock360/current/src HOME=/var/lib/dock360 \
+        /opt/dock360/current/.venv/bin/python /usr/local/sbin/openhamshack-feeds-preset "$FEEDS_BASE"); then
+    touch "$PRESET_DONE"
+    sync
+  else
+    say "could not preset the update feeds"
+    failed=1
+  fi
+fi
+
+# A first start can be cut short at any point - somebody pulls the plug
+# while QO-100 WB's 600 MB image is unpacking - and the next boot has to
+# finish the job. The first interim ISO did not: it deleted each preload
+# package as soon as the upload returned, and the upload's hundred files were
+# still in the page cache when the power went. The deletion reached the disk,
+# the files did not (module.yaml came back empty, the image half there), so
+# the next boot found no app in the store, no package to re-add it from, and
+# wrote the done marker anyway. Hence the order here:
+#
+#   * the packages stay in the preload folder until the very end, and are
+#     uploaded again on every run until then. An upload replaces the store's
+#     copy, so a torn one from a cut run is simply overwritten, and the cost
+#     is a few seconds of signature checking per boot until it is done;
+#   * every step that matters is followed by a sync, so what the next boot
+#     sees is what this one did;
+#   * an app is done only when it is installed, running and healthy - not
+#     when an install was started, and not when its row exists;
+#   * an app that cannot be installed is a failure, so the marker is not
+#     written and the next boot tries again.
+for pkg in "$PRELOAD"/*.d360mod; do
+  [[ -e "$pkg" ]] || continue
+  # dock360ctl drops to the service account, which must be able to read it.
+  chmod 0644 "$pkg"
+  if ! dock360ctl catalogue upload "$pkg"; then
+    say "could not add $(basename "$pkg") to the store"
+    failed=1
+  fi
+done
+sync
+
+# One line per module from `dock360ctl status`: "[up  ] <id> <version>
+# <health>". The JSON module list carries the unit's state but not the health
+# check's verdict, and a unit that is up is not yet an app that answers.
+# Health "unknown" is an app that declares no check, which is as healthy as
+# it can say it is.
+app_healthy() {
+  dock360ctl status 2>/dev/null \
+    | grep -Eq -- "^ *\[up +\] +$1 +[^ ]+ +(ok|unknown)$"
+}
+
+app_present() {
+  dock360ctl module list --json --quick 2>/dev/null \
+    | grep -Fq -- "\"id\": \"$1\""
+}
+
+in_store() {
+  dock360ctl catalogue list 2>/dev/null | grep -Eq -- "^$1 "
+}
+
+for app in $FIRST_APPS; do
+  if app_healthy "$app"; then
+    continue
+  fi
+  if ! in_store "$app"; then
+    say "$app is not in the store on this controller; cannot install it"
+    failed=1
+    continue
+  fi
+  if app_present "$app"; then
+    # Its row exists but it is not up and healthy: an install cut short.
+    # `update` installs the same version again over the top - image, unit,
+    # start, health - which is exactly the missing half. If even that fails
+    # (a row with no unit can defeat its rollback), the app has never run
+    # and holds no data yet, so removing it and starting again loses nothing.
+    say "$app was left half-installed; finishing it"
+    if ! dock360ctl update "$app"; then
+      say "repairing $app in place failed; removing it and installing it again"
+      dock360ctl uninstall "$app" || true
+      app_present "$app" || dock360ctl install "$app" || say "installing $app failed"
+    fi
+  else
+    dock360ctl install "$app" || say "installing $app failed"
+  fi
+  sync
+  # The verdict is the app's state afterwards, not either command's exit
+  # status: an install can report success for an app that then stops.
+  ok=0
+  for _ in $(seq 1 60); do
+    app_healthy "$app" && { ok=1; break; }
+    sleep 2
+  done
+  if [[ "$ok" == 1 ]]; then
+    say "$app is installed and healthy"
+  else
+    say "$app is not running and healthy; the next boot will try again"
+    failed=1
+  fi
+done
+
+if [[ "$failed" == 0 ]]; then
+  # The store keeps its own copy of every package now, and it is on disk;
+  # only then is the preload copy surplus.
+  rm -f "$PRELOAD"/*.d360mod
+  touch "$DONE"
+  sync
+  say "done"
+fi
+exit "$failed"
